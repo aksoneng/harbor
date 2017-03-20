@@ -53,9 +53,11 @@ body {
 }
 
 .dashboard-main {
-  background-image: url("/static/resources/img/akson-background.jpeg");
-  background-repeat:no-repeat;
-  background-position: center center;
+  background: url("/static/resources/img/akson-background.jpeg") no-repeat center center fixed;
+  -webkit-background-size: cover;
+  -moz-background-size: cover;
+  -o-background-size: cover;
+  background-size: cover;
 }
 
 .up-section {
