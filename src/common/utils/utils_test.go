@@ -1,24 +1,28 @@
-/*
-   Copyright (c) 2016 VMware, Inc. All Rights Reserved.
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright (c) 2017 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package utils
 
 import (
 	"encoding/base64"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestParseEndpoint(t *testing.T) {
@@ -140,6 +144,10 @@ func TestGenerateRandomString(t *testing.T) {
 	if len(str) != 32 {
 		t.Errorf("unexpected length: %d != %d", len(str), 32)
 	}
+	str2 := GenerateRandomString()
+	if str2 == str {
+		t.Errorf("Two identical random strings in a row: %s", str)
+	}
 }
 
 func TestParseLink(t *testing.T) {
@@ -176,5 +184,82 @@ func TestParseLink(t *testing.T) {
 	next := `/api/users?page=3&page_size=100`
 	if links.Next() != next {
 		t.Errorf("unexpected prev: %s != %s", links.Next(), next)
+	}
+}
+
+func TestTestTCPConn(t *testing.T) {
+	server := httptest.NewServer(nil)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	if err := TestTCPConn(addr, 60, 2); err != nil {
+		t.Fatalf("failed to test tcp connection of %s: %v", addr, err)
+	}
+}
+
+func TestParseTimeStamp(t *testing.T) {
+	// invalid input
+	_, err := ParseTimeStamp("")
+	assert.NotNil(t, err)
+
+	// invalid input
+	_, err = ParseTimeStamp("invalid")
+	assert.NotNil(t, err)
+
+	// valid
+	now := time.Now().Unix()
+	result, err := ParseTimeStamp(strconv.FormatInt(now, 10))
+	assert.Nil(t, err)
+	assert.Equal(t, now, result.Unix())
+}
+
+func TestParseHarborIDOrName(t *testing.T) {
+	// nil input
+	id, name, err := ParseProjectIDOrName(nil)
+	assert.NotNil(t, err)
+
+	// invalid ID
+	id, name, err = ParseProjectIDOrName(0)
+	assert.NotNil(t, err)
+
+	// invalid name
+	id, name, err = ParseProjectIDOrName("")
+	assert.NotNil(t, err)
+
+	// valid int ID
+	id, name, err = ParseProjectIDOrName(1)
+	assert.Nil(t, err)
+	assert.Equal(t, int64(1), id)
+	assert.Equal(t, "", name)
+
+	// valid int64 ID
+	id, name, err = ParseProjectIDOrName(int64(1))
+	assert.Nil(t, err)
+	assert.Equal(t, int64(1), id)
+	assert.Equal(t, "", name)
+
+	// valid name
+	id, name, err = ParseProjectIDOrName("project")
+	assert.Nil(t, err)
+	assert.Equal(t, int64(0), id)
+	assert.Equal(t, "project", name)
+}
+
+type testingStruct struct {
+	Name  string
+	Count int
+}
+
+func TestConvertMapToStruct(t *testing.T) {
+	dataMap := make(map[string]interface{})
+	dataMap["Name"] = "testing"
+	dataMap["Count"] = 100
+
+	obj := &testingStruct{}
+	if err := ConvertMapToStruct(obj, dataMap); err != nil {
+		t.Fatal(err)
+	} else {
+		if obj.Name != "testing" || obj.Count != 100 {
+			t.Fail()
+		}
 	}
 }

@@ -1,17 +1,16 @@
-/*
-   Copyright (c) 2016 VMware, Inc. All Rights Reserved.
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright (c) 2017 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package dao
 
@@ -25,13 +24,15 @@ import (
 
 // AddRepository adds a repo to the database.
 func AddRepository(repo models.RepoRecord) error {
-	o := GetOrmer()
-	sql := "insert into repository (owner_id, project_id, name, description, pull_count, star_count, creation_time, update_time) " +
-		"select (select user_id as owner_id from user where username=?), " +
-		"(select project_id as project_id from project where name=?), ?, ?, ?, ?, ?, NULL "
+	if repo.ProjectID == 0 {
+		return fmt.Errorf("invalid project ID: %d", repo.ProjectID)
+	}
 
-	_, err := o.Raw(sql, repo.OwnerName, repo.ProjectName, repo.Name, repo.Description,
-		repo.PullCount, repo.StarCount, time.Now()).Exec()
+	o := GetOrmer()
+	now := time.Now()
+	repo.CreationTime = now
+	repo.UpdateTime = now
+	_, err := o.Insert(&repo)
 	return err
 }
 
@@ -47,10 +48,11 @@ func GetRepositoryByName(name string) (*models.RepoRecord, error) {
 }
 
 // GetAllRepositories ...
-func GetAllRepositories() ([]models.RepoRecord, error) {
+func GetAllRepositories() ([]*models.RepoRecord, error) {
 	o := GetOrmer()
-	var repos []models.RepoRecord
-	_, err := o.QueryTable("repository").All(&repos)
+	var repos []*models.RepoRecord
+	_, err := o.QueryTable("repository").Limit(-1).
+		OrderBy("Name").All(&repos)
 	return repos, err
 }
 
@@ -77,10 +79,13 @@ func IncreasePullCount(name string) (err error) {
 			"pull_count":  orm.ColValue(orm.ColAdd, 1),
 			"update_time": time.Now(),
 		})
-	if num == 0 {
-		err = fmt.Errorf("Failed to increase repository pull count with name: %s %s", name, err.Error())
+	if err != nil {
+		return err
 	}
-	return err
+	if num == 0 {
+		return fmt.Errorf("Failed to increase repository pull count with name: %s", name)
+	}
+	return nil
 }
 
 //RepositoryExists returns whether the repository exists according to its name.
@@ -101,24 +106,21 @@ func GetRepositoryByProjectName(name string) ([]*models.RepoRecord, error) {
 	return repos, err
 }
 
-//GetTopRepos returns the most popular repositories
-func GetTopRepos(count int) ([]models.TopRepo, error) {
-	topRepos := []models.TopRepo{}
-
+//GetTopRepos returns the most popular repositories whose project ID is
+// in projectIDs
+func GetTopRepos(projectIDs []int64, n int) ([]*models.RepoRecord, error) {
 	repositories := []*models.RepoRecord{}
-	if _, err := GetOrmer().QueryTable(&models.RepoRecord{}).
-		OrderBy("-PullCount", "Name").Limit(count).All(&repositories); err != nil {
-		return topRepos, err
+	if len(projectIDs) == 0 {
+		return repositories, nil
 	}
 
-	for _, repository := range repositories {
-		topRepos = append(topRepos, models.TopRepo{
-			RepoName:    repository.Name,
-			AccessCount: repository.PullCount,
-		})
-	}
+	_, err := GetOrmer().QueryTable(&models.RepoRecord{}).
+		Filter("project_id__in", projectIDs).
+		OrderBy("-pull_count").
+		Limit(n).
+		All(&repositories)
 
-	return topRepos, nil
+	return repositories, err
 }
 
 // GetTotalOfRepositories ...
@@ -130,42 +132,38 @@ func GetTotalOfRepositories(name string) (int64, error) {
 	return qs.Count()
 }
 
-// GetTotalOfPublicRepositories ...
-func GetTotalOfPublicRepositories(name string) (int64, error) {
-	params := []interface{}{}
-	sql := `select count(*) from repository r 
-		join project p 
-		on r.project_id = p.project_id and p.public = 1 `
-	if len(name) != 0 {
-		sql += ` where r.name like ?`
-		params = append(params, "%"+escape(name)+"%")
+// GetTotalOfRepositoriesByProject ...
+func GetTotalOfRepositoriesByProject(projectIDs []int64, name string) (int64, error) {
+	if len(projectIDs) == 0 {
+		return 0, nil
 	}
 
-	var total int64
-	err := GetOrmer().Raw(sql, params).QueryRow(&total)
-	return total, err
+	qs := GetOrmer().QueryTable(&models.RepoRecord{}).
+		Filter("project_id__in", projectIDs)
+
+	if len(name) != 0 {
+		qs = qs.Filter("Name__contains", name)
+	}
+
+	return qs.Count()
 }
 
-// GetTotalOfUserRelevantRepositories ...
-func GetTotalOfUserRelevantRepositories(userID int, name string) (int64, error) {
-	params := []interface{}{}
-	sql := `select count(*) 
-		from repository r 
-		join (
-			select p.project_id, p.public 
-				from project p
-				join project_member pm
-				on p.project_id = pm.project_id
-				where pm.user_id = ?
-		) as pp 
-		on r.project_id = pp.project_id `
-	params = append(params, userID)
-	if len(name) != 0 {
-		sql += ` where r.name like ?`
-		params = append(params, "%"+escape(name)+"%")
-	}
+// GetRepositoriesByProject ...
+func GetRepositoriesByProject(projectID int64, name string,
+	limit, offset int64) ([]*models.RepoRecord, error) {
 
-	var total int64
-	err := GetOrmer().Raw(sql, params).QueryRow(&total)
-	return total, err
+	repositories := []*models.RepoRecord{}
+
+	qs := GetOrmer().QueryTable(&models.RepoRecord{}).
+		Filter("ProjectID", projectID)
+
+	if len(name) != 0 {
+		qs = qs.Filter("Name__contains", name)
+	}
+	if limit > 0 {
+		qs = qs.Limit(limit).Offset(offset)
+	}
+	_, err := qs.All(&repositories)
+
+	return repositories, err
 }

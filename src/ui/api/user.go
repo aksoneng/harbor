@@ -1,17 +1,16 @@
-/*
-   Copyright (c) 2016 VMware, Inc. All Rights Reserved.
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright (c) 2017 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package api
 
@@ -22,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/vmware/harbor/src/common/api"
 	"github.com/vmware/harbor/src/common/dao"
 	"github.com/vmware/harbor/src/common/models"
 	"github.com/vmware/harbor/src/common/utils/log"
@@ -31,7 +29,7 @@ import (
 
 // UserAPI handles request to /api/users/{}
 type UserAPI struct {
-	api.BaseAPI
+	BaseController
 	currentUserID    int
 	userID           int
 	SelfRegistration bool
@@ -46,20 +44,41 @@ type passwordReq struct {
 
 // Prepare validates the URL and parms
 func (ua *UserAPI) Prepare() {
-
-	ua.AuthMode = config.AuthMode()
-
-	ua.SelfRegistration = config.SelfRegistration()
-
-	if ua.Ctx.Input.IsPost() {
-		sessionUserID := ua.GetSession("userId")
-		_, _, ok := ua.Ctx.Request.BasicAuth()
-		if sessionUserID == nil && !ok {
-			return
-		}
+	ua.BaseController.Prepare()
+	mode, err := config.AuthMode()
+	if err != nil {
+		log.Errorf("failed to get auth mode: %v", err)
+		ua.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
 	}
 
-	ua.currentUserID = ua.ValidateUser()
+	ua.AuthMode = mode
+
+	self, err := config.SelfRegistration()
+	if err != nil {
+		log.Errorf("failed to get self registration: %v", err)
+		ua.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
+	}
+
+	ua.SelfRegistration = self
+
+	if !ua.SecurityCtx.IsAuthenticated() {
+		if ua.Ctx.Input.IsPost() {
+			return
+		}
+		ua.HandleUnauthorized()
+		return
+	}
+
+	user, err := dao.GetUser(models.User{
+		Username: ua.SecurityCtx.GetUsername(),
+	})
+	if err != nil {
+		ua.HandleInternalServerError(fmt.Sprintf("failed to get user %s: %v",
+			ua.SecurityCtx.GetUsername(), err))
+		return
+	}
+
+	ua.currentUserID = user.UserID
 	id := ua.Ctx.Input.Param(":id")
 	if id == "current" {
 		ua.userID = ua.currentUserID
@@ -82,37 +101,12 @@ func (ua *UserAPI) Prepare() {
 		}
 	}
 
-	var err error
-	ua.IsAdmin, err = dao.IsAdminRole(ua.currentUserID)
-	if err != nil {
-		log.Errorf("Error occurred in IsAdminRole:%v", err)
-		ua.CustomAbort(http.StatusInternalServerError, "Internal error.")
-	}
-
+	ua.IsAdmin = ua.SecurityCtx.IsSysAdmin()
 }
 
 // Get ...
 func (ua *UserAPI) Get() {
-	if ua.userID == 0 { //list users
-		if !ua.IsAdmin {
-			log.Errorf("Current user, id: %d does not have admin role, can not list users", ua.currentUserID)
-			ua.RenderError(http.StatusForbidden, "User does not have admin role")
-			return
-		}
-		username := ua.GetString("username")
-		userQuery := models.User{}
-		if len(username) > 0 {
-			userQuery.Username = username
-		}
-		userList, err := dao.ListUsers(userQuery)
-		if err != nil {
-			log.Errorf("Failed to get data from database, error: %v", err)
-			ua.RenderError(http.StatusInternalServerError, "Failed to query from database")
-			return
-		}
-		ua.Data["json"] = userList
-
-	} else if ua.userID == ua.currentUserID || ua.IsAdmin {
+	if ua.userID == ua.currentUserID || ua.IsAdmin {
 		userQuery := models.User{UserID: ua.userID}
 		u, err := dao.GetUser(userQuery)
 		if err != nil {
@@ -120,11 +114,47 @@ func (ua *UserAPI) Get() {
 			ua.CustomAbort(http.StatusInternalServerError, "Internal error.")
 		}
 		ua.Data["json"] = u
-	} else {
-		log.Errorf("Current user, id: %d does not have admin role, can not view other user's detail", ua.currentUserID)
+		ua.ServeJSON()
+		return
+	}
+
+	log.Errorf("Current user, id: %d does not have admin role, can not view other user's detail", ua.currentUserID)
+	ua.RenderError(http.StatusForbidden, "User does not have admin role")
+	return
+}
+
+// List ...
+func (ua *UserAPI) List() {
+	if !ua.IsAdmin {
+		log.Errorf("Current user, id: %d does not have admin role, can not list users", ua.currentUserID)
 		ua.RenderError(http.StatusForbidden, "User does not have admin role")
 		return
 	}
+
+	page, size := ua.GetPaginationParams()
+	query := &models.UserQuery{
+		Username: ua.GetString("username"),
+		Email:    ua.GetString("email"),
+		Pagination: &models.Pagination{
+			Page: page,
+			Size: size,
+		},
+	}
+
+	total, err := dao.GetTotalOfUsers(query)
+	if err != nil {
+		ua.HandleInternalServerError(fmt.Sprintf("failed to get total of users: %v", err))
+		return
+	}
+
+	users, err := dao.ListUsers(query)
+	if err != nil {
+		ua.HandleInternalServerError(fmt.Sprintf("failed to get users: %v", err))
+		return
+	}
+
+	ua.SetPaginationHeader(total, page, size)
+	ua.Data["json"] = users
 	ua.ServeJSON()
 }
 
@@ -234,12 +264,17 @@ func (ua *UserAPI) Delete() {
 		return
 	}
 
-	if config.AuthMode() == "ldap_auth" {
+	if ua.AuthMode == "ldap_auth" {
 		ua.CustomAbort(http.StatusForbidden, "user can not be deleted in LDAP authentication mode")
 	}
 
 	if ua.currentUserID == ua.userID {
 		ua.CustomAbort(http.StatusForbidden, "can not delete yourself")
+	}
+
+	if ua.userID == 1 {
+		ua.HandleForbidden(ua.SecurityCtx.GetUsername())
+		return
 	}
 
 	var err error
@@ -339,7 +374,7 @@ func commonValidate(user models.User) error {
 		return fmt.Errorf("Email can't be empty")
 	}
 
-	if isIllegalLength(user.Realname, 0, 20) {
+	if isIllegalLength(user.Realname, 1, 255) {
 		return fmt.Errorf("realname with illegal length")
 	}
 

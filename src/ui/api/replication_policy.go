@@ -1,17 +1,16 @@
-/*
-   Copyright (c) 2016 VMware, Inc. All Rights Reserved.
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright (c) 2017 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package api
 
@@ -24,24 +23,24 @@ import (
 	"github.com/vmware/harbor/src/common/dao"
 	"github.com/vmware/harbor/src/common/models"
 	"github.com/vmware/harbor/src/common/utils/log"
-    "github.com/vmware/harbor/src/common/api"
 )
 
 // RepPolicyAPI handles /api/replicationPolicies /api/replicationPolicies/:id/enablement
 type RepPolicyAPI struct {
-	api.BaseAPI
+	BaseController
 }
 
 // Prepare validates whether the user has system admin role
 func (pa *RepPolicyAPI) Prepare() {
-	uid := pa.ValidateUser()
-	var err error
-	isAdmin, err := dao.IsAdminRole(uid)
-	if err != nil {
-		log.Errorf("Failed to Check if the user is admin, error: %v, uid: %d", err, uid)
+	pa.BaseController.Prepare()
+	if !pa.SecurityCtx.IsAuthenticated() {
+		pa.HandleUnauthorized()
+		return
 	}
-	if !isAdmin {
-		pa.CustomAbort(http.StatusForbidden, "")
+
+	if !pa.SecurityCtx.IsSysAdmin() {
+		pa.HandleForbidden(pa.SecurityCtx.GetUsername())
+		return
 	}
 }
 
@@ -83,6 +82,19 @@ func (pa *RepPolicyAPI) List() {
 		log.Errorf("failed to filter policies %s project ID %d: %v", name, projectID, err)
 		pa.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
 	}
+
+	for _, policy := range policies {
+		project, err := pa.ProjectMgr.Get(policy.ProjectID)
+		if err != nil {
+			pa.ParseAndHandleError(fmt.Sprintf(
+				"failed to get project %d", policy.ProjectID), err)
+			return
+		}
+		if project != nil {
+			policy.ProjectName = project.Name
+		}
+	}
+
 	pa.Data["json"] = policies
 	pa.ServeJSON()
 }
@@ -104,10 +116,10 @@ func (pa *RepPolicyAPI) Post() {
 		}
 	*/
 
-	project, err := dao.GetProjectByID(policy.ProjectID)
+	project, err := pa.ProjectMgr.Get(policy.ProjectID)
 	if err != nil {
-		log.Errorf("failed to get project %d: %v", policy.ProjectID, err)
-		pa.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
+		pa.ParseAndHandleError(fmt.Sprintf("failed to get project %d", policy.ProjectID), err)
+		return
 	}
 
 	if project == nil {
